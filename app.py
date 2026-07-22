@@ -1,19 +1,23 @@
 """
 Amazon Search Term & ASIN Analyzer — Production Flask Web App for Render
-Stateless, Atomic File Processing & High-Performance Excel Analytics Engine
+Uses pandas for reliable Excel reading, CSV for processing, openpyxl only for styled output.
 """
 
 import os
 import re
+import io
+import csv
 import time
 import uuid
 import tempfile
+import traceback
 from collections import defaultdict
 
 from flask import Flask, render_template, request, jsonify, send_file
+import pandas as pd
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-import openpyxl.utils
+from openpyxl.utils import get_column_letter
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50 MB limit
@@ -28,7 +32,6 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 # ---------------------------------------------------------------------------
 @app.errorhandler(Exception)
 def handle_unexpected_error(e):
-    import traceback
     code = 500
     if hasattr(e, 'code') and isinstance(e.code, int):
         code = e.code
@@ -87,11 +90,19 @@ COLORS = [
 ]
 
 ASIN_REGEX = re.compile(r'\bB0[A-Z0-9]{8}\b', re.IGNORECASE)
+ILLEGAL_CHAR_REGEX = re.compile(r'[\x00-\x08\x0B\x0C\x0E-\x1F]')
 
 
 # ---------------------------------------------------------------------------
 # Core logic functions
 # ---------------------------------------------------------------------------
+def sanitize_val(val):
+    """Clean illegal XML control characters before writing to openpyxl."""
+    if isinstance(val, str):
+        return ILLEGAL_CHAR_REGEX.sub('', val)
+    return val
+
+
 def parse_numeric(val):
     """Safely parse currency strings ($1,234.50), numbers, or percentages into float."""
     if val is None:
@@ -134,14 +145,6 @@ def extract_asins_from_text(text):
     return [m.upper() for m in ASIN_REGEX.findall(str(text))]
 
 
-def build_headers_list(raw_headers):
-    headers = []
-    for idx, h in enumerate(raw_headers, 1):
-        val = str(h).strip() if h is not None else ""
-        headers.append(val if val else f"Unnamed: Column {idx}")
-    return headers
-
-
 def auto_pick_keyword_col(headers):
     for h in headers:
         if any(hint in h.lower() for hint in ["search term", "customer search term", "keyword", "query", "search_term"]):
@@ -165,7 +168,89 @@ def find_sales_column_index(headers):
 
 
 # ---------------------------------------------------------------------------
-# Excel styling
+# Pandas-based Excel reader: xlsx → list of lists (reliable, no openpyxl bugs)
+# ---------------------------------------------------------------------------
+def read_excel_sheet_as_rows(file_path, sheet_name):
+    """
+    Read a single sheet from an xlsx file using pandas.
+    Returns (headers: list[str], data_rows: list[list]).
+    Pandas handles all Excel XML quirks reliably.
+    """
+    df = pd.read_excel(file_path, sheet_name=sheet_name, header=None, dtype=str, engine='openpyxl')
+    
+    # Drop completely empty rows and columns
+    df = df.dropna(how='all').reset_index(drop=True)
+    df = df.dropna(axis=1, how='all')
+    
+    if df.empty:
+        return [], []
+    
+    # Find header row: row with the most non-empty cells in first 15 rows
+    best_row_idx = 0
+    max_cols = 0
+    for i in range(min(15, len(df))):
+        row = df.iloc[i]
+        col_count = sum(1 for v in row if pd.notna(v) and str(v).strip() != "")
+        if col_count > max_cols:
+            max_cols = col_count
+            best_row_idx = i
+    
+    # Extract headers
+    raw_headers = df.iloc[best_row_idx].tolist()
+    headers = []
+    for idx, h in enumerate(raw_headers, 1):
+        val = str(h).strip() if pd.notna(h) and str(h).strip() != "" else ""
+        headers.append(val if val else f"Unnamed: Column {idx}")
+    
+    # Extract data rows (everything after header row)
+    data_rows = []
+    for i in range(best_row_idx + 1, len(df)):
+        row = df.iloc[i].tolist()
+        # Pad to header length
+        while len(row) < len(headers):
+            row.append(None)
+        # Convert 'nan' strings back to None
+        row = [None if (pd.isna(v) if not isinstance(v, str) else False) else v for v in row]
+        data_rows.append(row)
+    
+    return headers, data_rows
+
+
+def get_sheet_names(file_path):
+    """Get sheet names using pandas (no openpyxl quirks)."""
+    xls = pd.ExcelFile(file_path, engine='openpyxl')
+    return xls.sheet_names
+
+
+def get_sheet_headers(file_path, sheet_name):
+    """Read just the first 20 rows to detect headers quickly."""
+    df = pd.read_excel(file_path, sheet_name=sheet_name, header=None, dtype=str, nrows=20, engine='openpyxl')
+    df = df.dropna(how='all').reset_index(drop=True)
+    df = df.dropna(axis=1, how='all')
+    
+    if df.empty:
+        return []
+    
+    best_row_idx = 0
+    max_cols = 0
+    for i in range(min(15, len(df))):
+        row = df.iloc[i]
+        col_count = sum(1 for v in row if pd.notna(v) and str(v).strip() != "")
+        if col_count > max_cols:
+            max_cols = col_count
+            best_row_idx = i
+    
+    raw_headers = df.iloc[best_row_idx].tolist()
+    headers = []
+    for idx, h in enumerate(raw_headers, 1):
+        val = str(h).strip() if pd.notna(h) and str(h).strip() != "" else ""
+        headers.append(val if val else f"Unnamed: Column {idx}")
+    
+    return headers
+
+
+# ---------------------------------------------------------------------------
+# Excel styling (openpyxl used ONLY for output)
 # ---------------------------------------------------------------------------
 title_font = Font(name="Calibri", size=14, bold=True, color="FFFFFF")
 header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
@@ -190,14 +275,14 @@ def write_analysis_sheet(wb, sheet_name, title_text, title_color,
     num_cols = len(new_headers)
 
     ws_new.merge_cells(start_row=1, start_column=1, end_row=1, end_column=num_cols)
-    title_cell = ws_new.cell(row=1, column=1, value=title_text)
+    title_cell = ws_new.cell(row=1, column=1, value=sanitize_val(title_text))
     title_cell.font = title_font
     title_cell.fill = PatternFill(start_color=title_color, end_color=title_color, fill_type="solid")
     title_cell.alignment = Alignment(horizontal="left", vertical="center")
     ws_new.row_dimensions[1].height = 30
 
     for col_idx, hdr in enumerate(new_headers, 1):
-        cell = ws_new.cell(row=2, column=col_idx, value=hdr)
+        cell = ws_new.cell(row=2, column=col_idx, value=sanitize_val(hdr))
         cell.font = header_font
         cell.fill = header_fill
         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
@@ -211,7 +296,7 @@ def write_analysis_sheet(wb, sheet_name, title_text, title_color,
         if not rows:
             return
         ws_new.merge_cells(start_row=current_row, start_column=1, end_row=current_row, end_column=num_cols)
-        divider = ws_new.cell(row=current_row, column=1, value=f"  ▎ {block_label}")
+        divider = ws_new.cell(row=current_row, column=1, value=sanitize_val(f"  ▎ {block_label}"))
         try:
             font_color = s_font.color.rgb if s_font.color and s_font.color.rgb else "2F5496"
         except Exception:
@@ -229,7 +314,7 @@ def write_analysis_sheet(wb, sheet_name, title_text, title_color,
                     current_row += 1
                 ws_new.merge_cells(start_row=current_row, start_column=1, end_row=current_row, end_column=num_cols)
                 count = sum(1 for s, _ in rows if s == subcat)
-                section_cell = ws_new.cell(row=current_row, column=1, value=f"  {subcat.upper()}  |  {count} terms shown")
+                section_cell = ws_new.cell(row=current_row, column=1, value=sanitize_val(f"  {subcat.upper()}  |  {count} terms shown"))
                 section_cell.font = s_font
                 section_cell.fill = s_fill
                 section_cell.alignment = Alignment(vertical="center")
@@ -238,7 +323,7 @@ def write_analysis_sheet(wb, sheet_name, title_text, title_color,
                 prev_cat = subcat
 
             for col_idx, val in enumerate(vals, 1):
-                cell = ws_new.cell(row=current_row, column=col_idx, value=val)
+                cell = ws_new.cell(row=current_row, column=col_idx, value=sanitize_val(val))
                 cell.font = data_font
                 cell.border = thin_border
                 col_name = headers[col_idx - 1] if col_idx - 1 < len(headers) else ""
@@ -249,7 +334,7 @@ def write_analysis_sheet(wb, sheet_name, title_text, title_color,
                 elif col_name in ("ROAS", "Effective_ROAS"):
                     cell.number_format = '#,##0.00'
 
-            sub_cell = ws_new.cell(row=current_row, column=num_cols, value=subcat)
+            sub_cell = ws_new.cell(row=current_row, column=num_cols, value=sanitize_val(subcat))
             sub_cell.font = Font(name="Calibri", size=10, bold=True, color="2F5496")
             sub_cell.border = thin_border
             current_row += 1
@@ -260,8 +345,9 @@ def write_analysis_sheet(wb, sheet_name, title_text, title_color,
 
     for col_idx, width in col_widths.items():
         if col_idx <= num_cols:
-            ws_new.column_dimensions[openpyxl.utils.get_column_letter(col_idx)].width = width
-    ws_new.auto_filter.ref = f"A2:{openpyxl.utils.get_column_letter(num_cols)}{current_row - 1}"
+            ws_new.column_dimensions[get_column_letter(col_idx)].width = width
+    if current_row > 3:
+        ws_new.auto_filter.ref = f"A2:{get_column_letter(num_cols)}{current_row - 1}"
 
 
 def write_asin_sheet(wb, all_asins, asin_rows, portfolio_idx):
@@ -275,7 +361,7 @@ def write_asin_sheet(wb, all_asins, asin_rows, portfolio_idx):
         asin_headers.append("Portfolio Name")
 
     wa.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(asin_headers))
-    t = wa.cell(row=1, column=1, value=f"Extracted ASINs  |  {len(all_asins)} unique")
+    t = wa.cell(row=1, column=1, value=sanitize_val(f"Extracted ASINs  |  {len(all_asins)} unique"))
     t.font = title_font
     t.fill = PatternFill(start_color="1B7340", end_color="1B7340", fill_type="solid")
     t.alignment = Alignment(horizontal="left", vertical="center")
@@ -283,7 +369,7 @@ def write_asin_sheet(wb, all_asins, asin_rows, portfolio_idx):
 
     ahf = PatternFill(start_color="2E8B57", end_color="2E8B57", fill_type="solid")
     for ci, h in enumerate(asin_headers, 1):
-        cell = wa.cell(row=2, column=ci, value=h)
+        cell = wa.cell(row=2, column=ci, value=sanitize_val(h))
         cell.font = header_font
         cell.fill = ahf
         cell.alignment = Alignment(horizontal="center", vertical="center")
@@ -294,14 +380,14 @@ def write_asin_sheet(wb, all_asins, asin_rows, portfolio_idx):
         rn = idx + 2
         wa.cell(row=rn, column=1, value=idx).font = data_font
         wa.cell(row=rn, column=1).border = thin_border
-        ac = wa.cell(row=rn, column=2, value=asin)
+        ac = wa.cell(row=rn, column=2, value=sanitize_val(asin))
         ac.font = Font(name="Calibri", size=10, bold=True, color="1B7340")
         ac.border = thin_border
-        sc = wa.cell(row=rn, column=3, value=src)
+        sc = wa.cell(row=rn, column=3, value=sanitize_val(src))
         sc.font = data_font
         sc.border = thin_border
         if has_portfolio:
-            pc = wa.cell(row=rn, column=4, value=port)
+            pc = wa.cell(row=rn, column=4, value=sanitize_val(port))
             pc.font = data_font
             pc.border = thin_border
 
@@ -310,7 +396,9 @@ def write_asin_sheet(wb, all_asins, asin_rows, portfolio_idx):
     wa.column_dimensions['C'].width = 60
     if has_portfolio:
         wa.column_dimensions['D'].width = 30
-    wa.auto_filter.ref = f"A2:{openpyxl.utils.get_column_letter(len(asin_headers))}{len(asin_rows) + 2}"
+    last_row = len(asin_rows) + 2
+    if last_row >= 3:
+        wa.auto_filter.ref = f"A2:{get_column_letter(len(asin_headers))}{last_row}"
 
 
 def build_best_worst(groups, sales_idx, mode):
@@ -357,7 +445,7 @@ def index():
 
 @app.route("/api/inspect", methods=["POST"])
 def inspect_file():
-    """Atomic endpoint: Fast read-only inspection of sheets and column headers (<200ms)."""
+    """Atomic endpoint: Fast read-only inspection of sheets and column headers."""
     if "file" not in request.files:
         return jsonify({"error": "No file uploaded"}), 400
     f = request.files["file"]
@@ -370,40 +458,17 @@ def inspect_file():
             tmp_path = tmp.name
 
         try:
-            wb = openpyxl.load_workbook(tmp_path, read_only=True, data_only=True)
-            sheets = wb.sheetnames
+            sheets = get_sheet_names(tmp_path)
             sheet_columns = {}
 
             for sheet in sheets:
-                ws = wb[sheet]
-                valid_rows = []
-                for row in ws.iter_rows(values_only=True):
-                    if not any(cell is not None and str(cell).strip() != "" for cell in row):
-                        continue
-                    valid_rows.append(list(row))
-                    if len(valid_rows) >= 15:
-                        break
-                
-                header_row_idx = 1
-                max_cols = 0
-                raw_headers = []
-                for i, row in enumerate(valid_rows, 1):
-                    while row and (row[-1] is None or str(row[-1]).strip() == ""):
-                        row.pop()
-                    col_count = sum(1 for v in row if v is not None and str(v).strip() != "")
-                    if col_count > max_cols:
-                        max_cols = col_count
-                        header_row_idx = i
-                        raw_headers = row
-                        
-                headers = build_headers_list(raw_headers)
+                headers = get_sheet_headers(tmp_path, sheet)
                 sheet_columns[sheet] = {
                     "columns": headers,
-                    "header_row": header_row_idx,
+                    "header_row": 1,
                     "keyword_default": auto_pick_keyword_col(headers),
                     "portfolio_default": auto_pick_portfolio_col(headers),
                 }
-            wb.close()
         finally:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
@@ -422,7 +487,6 @@ def inspect_file():
             "sheet_columns": sheet_columns
         })
     except Exception as e:
-        import traceback
         return jsonify({"error": f"Cannot read Excel file: {str(e)}", "trace": traceback.format_exc()}), 400
 
 
@@ -450,60 +514,44 @@ def process():
             tmp_path = tmp.name
 
         try:
-            wb_in = openpyxl.load_workbook(tmp_path, read_only=True, data_only=True)
-            if sheet_name not in wb_in.sheetnames:
-                return jsonify({"error": f"Sheet '{sheet_name}' not found in workbook."}), 400
-
-            ws = wb_in[sheet_name]
-            
-            valid_rows = []
-            for row in ws.iter_rows(values_only=True):
-                if not any(cell is not None and str(cell).strip() != "" for cell in row):
-                    continue
-                valid_rows.append(list(row))
-            wb_in.close()
-
-            header_row_idx = 0
-            max_cols = 0
-            raw_headers = []
-            for i, row in enumerate(valid_rows[:15]):
-                while row and (row[-1] is None or str(row[-1]).strip() == ""):
-                    row.pop()
-                col_count = sum(1 for v in row if v is not None and str(v).strip() != "")
-                if col_count > max_cols:
-                    max_cols = col_count
-                    header_row_idx = i
-                    raw_headers = row
-
-            headers = build_headers_list(raw_headers)
-            num_cols = len(headers)
-
-            try:
-                keyword_col_idx = headers.index(keyword_col)
-            except ValueError:
-                return jsonify({"error": f"Column '{keyword_col}' not found in sheet headers."}), 400
-
-            portfolio_idx = None
-            if portfolio_col and portfolio_col != "(None)":
-                try:
-                    portfolio_idx = headers.index(portfolio_col)
-                except ValueError:
-                    pass
-
-            # Read data rows
-            data_rows = []
-            for row_idx_offset, vals in enumerate(valid_rows[header_row_idx + 1:], start=header_row_idx + 2):
-                if len(vals) < num_cols:
-                    vals.extend([None] * (num_cols - len(vals)))
-                
-                cell_kw = vals[keyword_col_idx] if keyword_col_idx < len(vals) else None
-                if cell_kw and str(cell_kw).strip() != "" and "|" not in str(vals[0] or ""):
-                    data_rows.append((row_idx_offset, vals))
+            # ---- STEP 1: Read Excel with pandas (reliable, handles all quirks) ----
+            headers, all_data_rows = read_excel_sheet_as_rows(tmp_path, sheet_name)
         finally:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
 
-        # ASIN Extraction
+        if not headers:
+            return jsonify({"error": f"Sheet '{sheet_name}' appears to be empty or unreadable."}), 400
+
+        num_cols = len(headers)
+
+        try:
+            keyword_col_idx = headers.index(keyword_col)
+        except ValueError:
+            return jsonify({"error": f"Column '{keyword_col}' not found in sheet headers: {headers}"}), 400
+
+        portfolio_idx = None
+        if portfolio_col and portfolio_col != "(None)":
+            try:
+                portfolio_idx = headers.index(portfolio_col)
+            except ValueError:
+                pass
+
+        # ---- STEP 2: Filter data rows (pure Python, no openpyxl) ----
+        data_rows = []
+        for row_idx, vals in enumerate(all_data_rows, start=2):
+            # Pad row
+            while len(vals) < num_cols:
+                vals.append(None)
+
+            cell_kw = vals[keyword_col_idx] if keyword_col_idx < len(vals) else None
+            cell_first = vals[0] if len(vals) > 0 else None
+
+            # Skip rows with empty keyword or pipe-delimited aggregation rows
+            if cell_kw and str(cell_kw).strip() != "" and "|" not in str(cell_first or ""):
+                data_rows.append((row_idx, vals))
+
+        # ---- STEP 3: ASIN Extraction ----
         all_asins = set()
         asin_rows_list = []
         if extract_asins_flag:
@@ -515,7 +563,7 @@ def process():
                         all_asins.add(asin)
                         asin_rows_list.append((st, asin, port))
 
-        # Classify
+        # ---- STEP 4: Classify ----
         classified = []
         for _, vals in data_rows:
             broad_cat = str(vals[0]).strip() if (len(vals) > 0 and vals[0] is not None) else ""
@@ -527,31 +575,25 @@ def process():
                 final_subcat += f" - {color}"
             classified.append((final_subcat, search_term, vals))
 
-        # Sales column index detection
+        # ---- STEP 5: Sales column ----
         sales_idx = find_sales_column_index(headers)
 
-        # Create output workbook
+        # ---- STEP 6: Create output workbook (openpyxl used ONLY here for writing) ----
         wb_out = openpyxl.Workbook()
         if "Sheet" in wb_out.sheetnames:
             del wb_out["Sheet"]
-            
-        # Recreate the original data sheet to preserve it
+
+        # Recreate the original data sheet
         ws_orig = wb_out.create_sheet(sheet_name)
-        
-        # Write headers
         for c_idx, h in enumerate(headers, 1):
-            cell = ws_orig.cell(row=1, column=c_idx, value=h)
+            cell = ws_orig.cell(row=1, column=c_idx, value=sanitize_val(h))
             cell.font = Font(bold=True)
             cell.fill = PatternFill(start_color="DDDDDD", end_color="DDDDDD", fill_type="solid")
-            
-        # Write data rows
-        for r_idx, (orig_r, vals) in enumerate(data_rows, 2):
-            for c_idx, val in enumerate(vals, 1):
-                ws_orig.cell(row=r_idx, column=c_idx, value=val)
-                
-        # Optional: Auto-filter for original data sheet
+        for r_idx, (_, vals) in enumerate(data_rows, 2):
+            for c_idx, val in enumerate(vals[:num_cols], 1):
+                ws_orig.cell(row=r_idx, column=c_idx, value=sanitize_val(val))
         if data_rows:
-            ws_orig.auto_filter.ref = f"A1:{openpyxl.utils.get_column_letter(num_cols)}{len(data_rows)+1}"
+            ws_orig.auto_filter.ref = f"A1:{get_column_letter(num_cols)}{len(data_rows) + 1}"
 
         sheets_written = [sheet_name]
         categories_found = set()
@@ -609,7 +651,6 @@ def process():
             "elapsed": round(elapsed, 2),
         })
     except Exception as e:
-        import traceback
         return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
 
 
