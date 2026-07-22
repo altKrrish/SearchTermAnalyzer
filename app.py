@@ -135,21 +135,11 @@ def extract_asins_from_text(text):
 
 
 def detect_header_row(ws):
-    """Scan first 15 rows and pick the row with the most non-empty columns."""
     best_row_idx = 1
     best_row_data = []
     max_cols = 0
-    max_c = max(ws.max_column or 100, 100)
-    
-    # Read into a list first because read_only mode does not support multiple iterations
-    # We do NOT use min_row or max_row because openpyxl's read_only row-seeking can fail on certain XML structures
-    first_rows = []
-    for idx, row in enumerate(ws.iter_rows(max_col=max_c, values_only=True), 1):
-        first_rows.append(row)
-        if idx >= 15:
-            break
-    
-    for i, row in enumerate(first_rows, 1):
+    max_c = max(ws.max_column or 1, 100)
+    for i, row in enumerate(ws.iter_rows(min_row=1, max_row=15, max_col=max_c, values_only=True), 1):
         raw = list(row)
         while raw and (raw[-1] is None or str(raw[-1]).strip() == ""):
             raw.pop()
@@ -158,9 +148,9 @@ def detect_header_row(ws):
             max_cols = col_count
             best_row_idx = i
             best_row_data = raw
-            
+
     if max_cols == 0:
-        for i, row in enumerate(first_rows, 1):
+        for i, row in enumerate(ws.iter_rows(min_row=1, max_row=15, max_col=max_c, values_only=True), 1):
             raw = list(row)
             while raw and (raw[-1] is None or str(raw[-1]).strip() == ""):
                 raw.pop()
@@ -169,7 +159,6 @@ def detect_header_row(ws):
                 max_cols = col_count
                 best_row_idx = i
                 best_row_data = raw
-                
     return best_row_idx, best_row_data
 
 
@@ -409,8 +398,7 @@ def inspect_file():
             tmp_path = tmp.name
 
         try:
-            # Load workbook in read_only mode for instant inspection
-            wb = openpyxl.load_workbook(tmp_path, read_only=True, data_only=True)
+            wb = openpyxl.load_workbook(tmp_path, read_only=True)
             sheets = wb.sheetnames
             sheet_columns = {}
 
@@ -471,7 +459,7 @@ def process():
             tmp_path = tmp.name
 
         try:
-            wb_in = openpyxl.load_workbook(tmp_path, read_only=True, data_only=True)
+            wb_in = openpyxl.load_workbook(tmp_path, data_only=True)
             if sheet_name not in wb_in.sheetnames:
                 return jsonify({"error": f"Sheet '{sheet_name}' not found in workbook."}), 400
 
@@ -479,11 +467,6 @@ def process():
             header_row_idx, raw_headers = detect_header_row(ws)
             headers = build_headers_list(raw_headers)
             num_cols = len(headers)
-            
-            # Reopen the workbook to reset the read_only iterator before the second pass
-            wb_in.close()
-            wb_in = openpyxl.load_workbook(tmp_path, read_only=True, data_only=True)
-            ws = wb_in[sheet_name]
 
             try:
                 keyword_col_idx = headers.index(keyword_col)
@@ -497,19 +480,17 @@ def process():
                 except ValueError:
                     pass
 
+            # Read data rows
+            max_c = max(ws.max_column or 1, 100)
             data_rows = []
-            for row_idx, row_vals in enumerate(ws.iter_rows(max_col=num_cols, values_only=True), start=1):
-                if row_idx <= header_row_idx:
-                    continue
+            for row_idx, row_vals in enumerate(ws.iter_rows(min_row=header_row_idx + 1, max_col=max_c, values_only=True), start=header_row_idx + 1):
                 if not row_vals:
                     continue
                 vals = list(row_vals[:num_cols])
                 if len(vals) < num_cols:
                     vals.extend([None] * (num_cols - len(vals)))
-                
                 cell_kw = vals[keyword_col_idx] if keyword_col_idx < len(vals) else None
-                cell_first = vals[0] if len(vals) > 0 else None
-                if cell_kw and str(cell_kw).strip() != "" and "|" not in str(cell_first or ""):
+                if cell_kw and str(cell_kw).strip() != "" and "|" not in str(vals[0] or ""):
                     data_rows.append((row_idx, vals))
                     
             wb_in.close()
