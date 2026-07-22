@@ -1,0 +1,940 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Search Term Analyzer — Amazon PPC Intelligence</title>
+    <meta name="description" content="Analyze Amazon search terms and ASINs. Get Top 10 best and worst performers per category instantly.">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
+    <style>
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+        :root {
+            --bg-primary: #0a0e1a;
+            --bg-secondary: #111827;
+            --bg-card: rgba(17, 24, 39, 0.7);
+            --bg-card-hover: rgba(30, 41, 59, 0.8);
+            --border-subtle: rgba(99, 102, 241, 0.15);
+            --border-active: rgba(99, 102, 241, 0.4);
+            --accent-primary: #6366f1;
+            --accent-secondary: #818cf8;
+            --accent-glow: rgba(99, 102, 241, 0.25);
+            --success: #10b981;
+            --success-glow: rgba(16, 185, 129, 0.2);
+            --warning: #f59e0b;
+            --error: #ef4444;
+            --text-primary: #f1f5f9;
+            --text-secondary: #94a3b8;
+            --text-muted: #64748b;
+            --gradient-hero: linear-gradient(135deg, #6366f1 0%, #8b5cf6 50%, #a78bfa 100%);
+            --gradient-card: linear-gradient(135deg, rgba(99,102,241,0.08) 0%, rgba(139,92,246,0.04) 100%);
+            --gradient-success: linear-gradient(135deg, #10b981 0%, #059669 100%);
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+
+        /* Animated background mesh */
+        .bg-mesh {
+            position: fixed;
+            inset: 0;
+            z-index: 0;
+            background:
+                radial-gradient(ellipse 600px 400px at 20% 20%, rgba(99,102,241,0.08) 0%, transparent 70%),
+                radial-gradient(ellipse 500px 350px at 80% 70%, rgba(139,92,246,0.06) 0%, transparent 70%),
+                radial-gradient(ellipse 400px 300px at 50% 50%, rgba(59,130,246,0.04) 0%, transparent 70%);
+            animation: meshFloat 20s ease-in-out infinite alternate;
+        }
+        @keyframes meshFloat {
+            0% { transform: scale(1) translate(0, 0); }
+            100% { transform: scale(1.05) translate(-10px, 15px); }
+        }
+
+        .app-container {
+            position: relative;
+            z-index: 1;
+            max-width: 960px;
+            margin: 0 auto;
+            padding: 24px 20px 60px;
+        }
+
+        /* Header */
+        .header {
+            text-align: center;
+            padding: 48px 0 40px;
+        }
+        .header-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 14px;
+            border-radius: 100px;
+            background: rgba(99,102,241,0.1);
+            border: 1px solid rgba(99,102,241,0.2);
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--accent-secondary);
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+            margin-bottom: 20px;
+        }
+        .header-badge .dot {
+            width: 6px; height: 6px;
+            border-radius: 50%;
+            background: var(--success);
+            animation: pulse 2s ease-in-out infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
+        }
+        .header h1 {
+            font-size: 36px;
+            font-weight: 800;
+            letter-spacing: -0.03em;
+            background: var(--gradient-hero);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            line-height: 1.2;
+            margin-bottom: 12px;
+        }
+        .header p {
+            font-size: 15px;
+            color: var(--text-secondary);
+            max-width: 500px;
+            margin: 0 auto;
+            line-height: 1.6;
+        }
+
+        /* Steps */
+        .step-section {
+            margin-bottom: 24px;
+        }
+        .step-header {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 16px;
+        }
+        .step-number {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 32px; height: 32px;
+            border-radius: 10px;
+            background: var(--gradient-hero);
+            color: white;
+            font-size: 14px;
+            font-weight: 700;
+            flex-shrink: 0;
+        }
+        .step-number.done {
+            background: var(--gradient-success);
+        }
+        .step-title {
+            font-size: 16px;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+        .step-subtitle {
+            font-size: 12px;
+            color: var(--text-muted);
+            margin-top: 1px;
+        }
+
+        /* Card */
+        .card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-subtle);
+            border-radius: 16px;
+            padding: 28px;
+            backdrop-filter: blur(20px);
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        .card:hover {
+            border-color: var(--border-active);
+            box-shadow: 0 0 30px var(--accent-glow);
+        }
+        .card.disabled {
+            opacity: 0.4;
+            pointer-events: none;
+            filter: grayscale(0.3);
+        }
+
+        /* Upload Zone */
+        .upload-zone {
+            border: 2px dashed rgba(99,102,241,0.25);
+            border-radius: 14px;
+            padding: 48px 24px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            background: rgba(99,102,241,0.03);
+            position: relative;
+            overflow: hidden;
+        }
+        .upload-zone:hover, .upload-zone.dragover {
+            border-color: var(--accent-primary);
+            background: rgba(99,102,241,0.06);
+            box-shadow: 0 0 40px rgba(99,102,241,0.1);
+        }
+        .upload-zone.has-file {
+            border-color: var(--success);
+            background: rgba(16,185,129,0.04);
+            padding: 24px;
+        }
+        .upload-icon {
+            font-size: 42px;
+            margin-bottom: 12px;
+            display: block;
+        }
+        .upload-text {
+            font-size: 15px;
+            font-weight: 500;
+            color: var(--text-secondary);
+            margin-bottom: 6px;
+        }
+        .upload-hint {
+            font-size: 12px;
+            color: var(--text-muted);
+        }
+        .file-info {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+        }
+        .file-info .file-icon {
+            width: 44px; height: 44px;
+            border-radius: 12px;
+            background: rgba(16,185,129,0.1);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 22px;
+            flex-shrink: 0;
+        }
+        .file-info .file-details { flex: 1; text-align: left; }
+        .file-info .file-name {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--text-primary);
+            margin-bottom: 2px;
+        }
+        .file-info .file-meta {
+            font-size: 12px;
+            color: var(--success);
+            font-weight: 500;
+        }
+        .file-info .file-remove {
+            width: 32px; height: 32px;
+            border-radius: 8px;
+            border: 1px solid rgba(239,68,68,0.2);
+            background: rgba(239,68,68,0.08);
+            color: var(--error);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 16px;
+            transition: all 0.2s;
+        }
+        .file-info .file-remove:hover {
+            background: rgba(239,68,68,0.15);
+            border-color: rgba(239,68,68,0.4);
+        }
+        #file-input { display: none; }
+
+        /* Form elements */
+        .form-group {
+            margin-bottom: 18px;
+        }
+        .form-group:last-child { margin-bottom: 0; }
+        .form-label {
+            display: block;
+            font-size: 13px;
+            font-weight: 500;
+            color: var(--text-secondary);
+            margin-bottom: 8px;
+        }
+        .form-label .required {
+            color: var(--error);
+            margin-left: 2px;
+        }
+        select, .custom-select {
+            width: 100%;
+            padding: 12px 16px;
+            border-radius: 10px;
+            border: 1px solid var(--border-subtle);
+            background: rgba(15, 23, 42, 0.6);
+            color: var(--text-primary);
+            font-family: 'Inter', sans-serif;
+            font-size: 14px;
+            cursor: pointer;
+            transition: all 0.2s;
+            appearance: none;
+            -webkit-appearance: none;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' fill='%2394a3b8' viewBox='0 0 16 16'%3E%3Cpath d='M4.646 5.646a.5.5 0 0 1 .708 0L8 8.293l2.646-2.647a.5.5 0 0 1 .708.708l-3 3a.5.5 0 0 1-.708 0l-3-3a.5.5 0 0 1 0-.708z'/%3E%3C/svg%3E");
+            background-repeat: no-repeat;
+            background-position: right 14px center;
+            padding-right: 40px;
+        }
+        select:focus {
+            outline: none;
+            border-color: var(--accent-primary);
+            box-shadow: 0 0 0 3px var(--accent-glow);
+        }
+        select:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+        select option {
+            background: var(--bg-secondary);
+            color: var(--text-primary);
+        }
+
+        /* Columns row */
+        .columns-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+        }
+        @media (max-width: 600px) {
+            .columns-row { grid-template-columns: 1fr; }
+        }
+
+        /* Radio pills */
+        .radio-group {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+        .radio-pill {
+            position: relative;
+        }
+        .radio-pill input {
+            position: absolute;
+            opacity: 0;
+            pointer-events: none;
+        }
+        .radio-pill label {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 10px 20px;
+            border-radius: 10px;
+            border: 1px solid var(--border-subtle);
+            background: rgba(15, 23, 42, 0.4);
+            color: var(--text-secondary);
+            font-size: 13px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        .radio-pill label:hover {
+            border-color: var(--border-active);
+            color: var(--text-primary);
+        }
+        .radio-pill input:checked + label {
+            border-color: var(--accent-primary);
+            background: rgba(99,102,241,0.12);
+            color: var(--accent-secondary);
+            box-shadow: 0 0 20px rgba(99,102,241,0.1);
+        }
+        .radio-pill .pill-icon { font-size: 16px; }
+
+        /* Checkbox */
+        .checkbox-wrapper {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-top: 14px;
+        }
+        .checkbox-wrapper input[type="checkbox"] {
+            width: 18px; height: 18px;
+            border-radius: 5px;
+            border: 1.5px solid var(--border-subtle);
+            background: rgba(15, 23, 42, 0.6);
+            cursor: pointer;
+            accent-color: var(--accent-primary);
+        }
+        .checkbox-wrapper label {
+            font-size: 13px;
+            color: var(--text-secondary);
+            cursor: pointer;
+        }
+
+        /* Run Button */
+        .btn-run {
+            width: 100%;
+            padding: 16px 24px;
+            border: none;
+            border-radius: 14px;
+            background: var(--gradient-hero);
+            color: white;
+            font-family: 'Inter', sans-serif;
+            font-size: 15px;
+            font-weight: 700;
+            letter-spacing: 0.02em;
+            cursor: pointer;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            position: relative;
+            overflow: hidden;
+            margin-top: 8px;
+        }
+        .btn-run::before {
+            content: '';
+            position: absolute;
+            inset: 0;
+            background: linear-gradient(135deg, rgba(255,255,255,0.1) 0%, transparent 50%);
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+        .btn-run:hover::before { opacity: 1; }
+        .btn-run:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 30px rgba(99,102,241,0.35);
+        }
+        .btn-run:active { transform: translateY(0); }
+        .btn-run:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+        .btn-run.processing {
+            background: linear-gradient(135deg, #4f46e5 0%, #6d28d9 100%);
+            animation: btnPulse 1.5s ease-in-out infinite;
+        }
+        @keyframes btnPulse {
+            0%, 100% { box-shadow: 0 0 20px rgba(99,102,241,0.2); }
+            50% { box-shadow: 0 0 40px rgba(99,102,241,0.4); }
+        }
+
+        /* Results Panel */
+        .results-panel {
+            margin-top: 24px;
+            animation: slideUp 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        @keyframes slideUp {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .results-card {
+            background: var(--bg-card);
+            border: 1px solid rgba(16,185,129,0.2);
+            border-radius: 16px;
+            padding: 28px;
+            backdrop-filter: blur(20px);
+        }
+        .results-title {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 18px;
+            font-weight: 700;
+            margin-bottom: 20px;
+        }
+        .results-title .check-icon {
+            width: 28px; height: 28px;
+            border-radius: 50%;
+            background: var(--gradient-success);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 14px;
+        }
+
+        /* Stats Grid */
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+            gap: 12px;
+            margin-bottom: 24px;
+        }
+        .stat-card {
+            background: rgba(15, 23, 42, 0.5);
+            border: 1px solid rgba(99,102,241,0.1);
+            border-radius: 12px;
+            padding: 16px;
+            text-align: center;
+        }
+        .stat-value {
+            font-size: 24px;
+            font-weight: 800;
+            background: var(--gradient-hero);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        .stat-label {
+            font-size: 11px;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-top: 4px;
+            font-weight: 600;
+        }
+
+        /* Sheets list */
+        .sheets-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-bottom: 20px;
+        }
+        .sheet-tag {
+            padding: 6px 14px;
+            border-radius: 8px;
+            background: rgba(99,102,241,0.1);
+            border: 1px solid rgba(99,102,241,0.15);
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--accent-secondary);
+        }
+
+        /* Download button */
+        .btn-download {
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+            padding: 14px 28px;
+            border: none;
+            border-radius: 12px;
+            background: var(--gradient-success);
+            color: white;
+            font-family: 'Inter', sans-serif;
+            font-size: 14px;
+            font-weight: 700;
+            cursor: pointer;
+            transition: all 0.3s;
+            text-decoration: none;
+        }
+        .btn-download:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 25px rgba(16,185,129,0.3);
+        }
+
+        /* Error toast */
+        .error-bar {
+            background: rgba(239,68,68,0.1);
+            border: 1px solid rgba(239,68,68,0.25);
+            border-radius: 12px;
+            padding: 14px 18px;
+            margin-top: 16px;
+            font-size: 13px;
+            color: #fca5a5;
+            display: none;
+            animation: slideUp 0.3s ease;
+        }
+        .error-bar.visible { display: block; }
+
+        /* Progress spinner */
+        .spinner {
+            display: inline-block;
+            width: 18px; height: 18px;
+            border: 2.5px solid rgba(255,255,255,0.25);
+            border-top-color: white;
+            border-radius: 50%;
+            animation: spin 0.7s linear infinite;
+            margin-right: 8px;
+            vertical-align: middle;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* Footer */
+        .footer {
+            text-align: center;
+            padding: 40px 0 20px;
+            font-size: 12px;
+            color: var(--text-muted);
+        }
+        .footer a {
+            color: var(--accent-secondary);
+            text-decoration: none;
+        }
+
+        /* Fade-in for steps */
+        .fade-in {
+            animation: fadeIn 0.4s ease;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(8px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+    </style>
+</head>
+<body>
+    <div class="bg-mesh"></div>
+
+    <div class="app-container">
+        <!-- Header -->
+        <header class="header">
+            <div class="header-badge">
+                <span class="dot"></span>
+                Amazon PPC Intelligence
+            </div>
+            <h1>Search Term & ASIN Analyzer</h1>
+            <p>Upload your Amazon search term report. Get instant Top 10 best & worst performers per category.</p>
+        </header>
+
+        <!-- Step 1: Upload -->
+        <section class="step-section" id="step-1">
+            <div class="step-header">
+                <div class="step-number" id="step1-num">1</div>
+                <div>
+                    <div class="step-title">Upload Report</div>
+                    <div class="step-subtitle">Excel (.xlsx) — Search Term Audit or Bulk Report</div>
+                </div>
+            </div>
+            <div class="card">
+                <div class="upload-zone" id="upload-zone" role="button" tabindex="0">
+                    <span class="upload-icon">📊</span>
+                    <div class="upload-text">Drop your Excel file here or click to browse</div>
+                    <div class="upload-hint">Supports .xlsx up to 50 MB</div>
+                </div>
+                <input type="file" id="file-input" accept=".xlsx">
+            </div>
+        </section>
+
+        <!-- Step 2: Configure -->
+        <section class="step-section" id="step-2">
+            <div class="step-header">
+                <div class="step-number" id="step2-num">2</div>
+                <div>
+                    <div class="step-title">Configure Analysis</div>
+                    <div class="step-subtitle">Auto-detected columns — adjust if needed</div>
+                </div>
+            </div>
+            <div class="card disabled" id="config-card">
+                <div class="form-group">
+                    <label class="form-label">Target Sheet <span class="required">*</span></label>
+                    <select id="sheet-select" disabled>
+                        <option value="">— Upload a file first —</option>
+                    </select>
+                </div>
+
+                <div class="columns-row">
+                    <div class="form-group">
+                        <label class="form-label">Keyword / Search Term Column <span class="required">*</span></label>
+                        <select id="keyword-col" disabled>
+                            <option value="">—</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Portfolio Column (Optional)</label>
+                        <select id="portfolio-col" disabled>
+                            <option value="(None)">None</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Analysis Mode</label>
+                    <div class="radio-group">
+                        <div class="radio-pill">
+                            <input type="radio" name="mode" id="mode-st" value="Search Term" checked>
+                            <label for="mode-st"><span class="pill-icon">🔍</span> Search Term</label>
+                        </div>
+                        <div class="radio-pill">
+                            <input type="radio" name="mode" id="mode-asin" value="ASIN">
+                            <label for="mode-asin"><span class="pill-icon">📦</span> ASIN</label>
+                        </div>
+                        <div class="radio-pill">
+                            <input type="radio" name="mode" id="mode-both" value="Both">
+                            <label for="mode-both"><span class="pill-icon">⚡</span> Both</label>
+                        </div>
+                    </div>
+                    <div class="checkbox-wrapper">
+                        <input type="checkbox" id="extract-asins" checked>
+                        <label for="extract-asins">Extract all unique ASINs to a separate sheet</label>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Step 3: Run -->
+        <section class="step-section" id="step-3">
+            <div class="step-header">
+                <div class="step-number" id="step3-num">3</div>
+                <div>
+                    <div class="step-title">Generate Report</div>
+                    <div class="step-subtitle">Top 10 Best & Worst per category</div>
+                </div>
+            </div>
+            <button class="btn-run" id="run-btn" disabled>
+                🚀&nbsp;&nbsp;Run Analysis
+            </button>
+            <div class="error-bar" id="error-bar"></div>
+        </section>
+
+        <!-- Results -->
+        <section class="results-panel" id="results-panel" style="display:none;">
+            <div class="results-card">
+                <div class="results-title">
+                    <div class="check-icon">✓</div>
+                    Analysis Complete
+                </div>
+                <div class="stats-grid" id="stats-grid"></div>
+                <div class="sheets-list" id="sheets-list"></div>
+                <a class="btn-download" id="download-btn" href="#">
+                    ⬇️&nbsp;&nbsp;Download Report (.xlsx)
+                </a>
+            </div>
+        </section>
+
+        <footer class="footer">
+            Built for Amazon PPC optimization &nbsp;·&nbsp; Powered by Python + Flask
+        </footer>
+    </div>
+
+    <script>
+        const state = {
+            fileId: null,
+            filename: null,
+        };
+
+        // Elements
+        const uploadZone = document.getElementById('upload-zone');
+        const fileInput = document.getElementById('file-input');
+        const configCard = document.getElementById('config-card');
+        const sheetSelect = document.getElementById('sheet-select');
+        const keywordCol = document.getElementById('keyword-col');
+        const portfolioCol = document.getElementById('portfolio-col');
+        const runBtn = document.getElementById('run-btn');
+        const errorBar = document.getElementById('error-bar');
+        const resultsPanel = document.getElementById('results-panel');
+
+        // ── Upload Zone ──
+        uploadZone.addEventListener('click', () => fileInput.click());
+        uploadZone.addEventListener('keydown', e => { if (e.key === 'Enter') fileInput.click(); });
+
+        uploadZone.addEventListener('dragover', e => {
+            e.preventDefault();
+            uploadZone.classList.add('dragover');
+        });
+        uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('dragover'));
+        uploadZone.addEventListener('drop', e => {
+            e.preventDefault();
+            uploadZone.classList.remove('dragover');
+            if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
+        });
+        fileInput.addEventListener('change', () => {
+            if (fileInput.files.length) handleFile(fileInput.files[0]);
+        });
+
+        async function handleFile(file) {
+            if (!file.name.endsWith('.xlsx')) {
+                showError('Only .xlsx files are supported.');
+                return;
+            }
+
+            // Show loading in upload zone
+            uploadZone.classList.add('has-file');
+            uploadZone.innerHTML = `
+                <div class="file-info">
+                    <div class="file-icon">📄</div>
+                    <div class="file-details">
+                        <div class="file-name">${file.name}</div>
+                        <div class="file-meta"><span class="spinner"></span> Uploading...</div>
+                    </div>
+                </div>
+            `;
+
+            const formData = new FormData();
+            formData.append('file', file);
+
+            try {
+                const res = await fetch('/api/upload', { method: 'POST', body: formData });
+                const data = await res.json();
+                if (data.error) throw new Error(data.error);
+
+                state.fileId = data.file_id;
+                state.filename = data.filename;
+
+                // Update upload zone
+                uploadZone.innerHTML = `
+                    <div class="file-info">
+                        <div class="file-icon">✅</div>
+                        <div class="file-details">
+                            <div class="file-name">${data.filename}</div>
+                            <div class="file-meta">${data.sheets.length} sheets detected</div>
+                        </div>
+                        <button class="file-remove" onclick="resetUpload(event)" title="Remove file">✕</button>
+                    </div>
+                `;
+
+                // Populate sheet dropdown
+                sheetSelect.innerHTML = data.sheets.map(s =>
+                    `<option value="${s}">${s}</option>`
+                ).join('');
+
+                // Auto-select preferred sheet
+                const preferred = ['Exact_Matches_Sorted', 'P1_Exact_Candidates', 'Sheet1'];
+                for (const p of preferred) {
+                    if (data.sheets.includes(p)) { sheetSelect.value = p; break; }
+                }
+
+                // Enable config
+                configCard.classList.remove('disabled');
+                sheetSelect.disabled = false;
+                document.getElementById('step1-num').classList.add('done');
+                document.getElementById('step1-num').textContent = '✓';
+
+                hideError();
+                loadColumns();
+            } catch (err) {
+                showError(err.message);
+                resetUpload();
+            }
+        }
+
+        function resetUpload(e) {
+            if (e) e.stopPropagation();
+            state.fileId = null;
+            state.filename = null;
+            fileInput.value = '';
+            uploadZone.classList.remove('has-file');
+            uploadZone.innerHTML = `
+                <span class="upload-icon">📊</span>
+                <div class="upload-text">Drop your Excel file here or click to browse</div>
+                <div class="upload-hint">Supports .xlsx up to 50 MB</div>
+            `;
+            configCard.classList.add('disabled');
+            sheetSelect.disabled = true;
+            keywordCol.disabled = true;
+            portfolioCol.disabled = true;
+            runBtn.disabled = true;
+            resultsPanel.style.display = 'none';
+            document.getElementById('step1-num').classList.remove('done');
+            document.getElementById('step1-num').textContent = '1';
+            document.getElementById('step2-num').classList.remove('done');
+            document.getElementById('step2-num').textContent = '2';
+        }
+
+        sheetSelect.addEventListener('change', loadColumns);
+
+        async function loadColumns() {
+            const sheet = sheetSelect.value;
+            if (!state.fileId || !sheet) return;
+
+            try {
+                const res = await fetch('/api/columns', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ file_id: state.fileId, sheet })
+                });
+                const data = await res.json();
+                if (data.error) throw new Error(data.error);
+
+                // Populate keyword column
+                keywordCol.innerHTML = data.columns.map(c =>
+                    `<option value="${c}" ${c === data.keyword_default ? 'selected' : ''}>${c}</option>`
+                ).join('');
+                keywordCol.disabled = false;
+
+                // Populate portfolio column
+                portfolioCol.innerHTML = `<option value="(None)">None</option>` +
+                    data.columns.map(c =>
+                        `<option value="${c}" ${c === data.portfolio_default ? 'selected' : ''}>${c}</option>`
+                    ).join('');
+                portfolioCol.disabled = false;
+
+                runBtn.disabled = false;
+                document.getElementById('step2-num').classList.add('done');
+                document.getElementById('step2-num').textContent = '✓';
+                hideError();
+            } catch (err) {
+                showError(err.message);
+            }
+        }
+
+        // ── Run Analysis ──
+        runBtn.addEventListener('click', async () => {
+            if (!state.fileId) return;
+
+            const mode = document.querySelector('input[name="mode"]:checked').value;
+            const extractAsins = document.getElementById('extract-asins').checked;
+
+            runBtn.disabled = true;
+            runBtn.classList.add('processing');
+            runBtn.innerHTML = '<span class="spinner"></span> Processing...';
+            resultsPanel.style.display = 'none';
+            hideError();
+
+            try {
+                const res = await fetch('/api/process', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        file_id: state.fileId,
+                        sheet: sheetSelect.value,
+                        keyword_col: keywordCol.value,
+                        portfolio_col: portfolioCol.value,
+                        analysis_mode: mode,
+                        extract_asins: extractAsins,
+                    })
+                });
+                const data = await res.json();
+                if (data.error) throw new Error(data.error);
+
+                // Show results
+                showResults(data);
+                document.getElementById('step3-num').classList.add('done');
+                document.getElementById('step3-num').textContent = '✓';
+            } catch (err) {
+                showError(err.message);
+            } finally {
+                runBtn.disabled = false;
+                runBtn.classList.remove('processing');
+                runBtn.innerHTML = '🚀&nbsp;&nbsp;Run Analysis';
+            }
+        });
+
+        function showResults(data) {
+            const statsGrid = document.getElementById('stats-grid');
+            const sheetsList = document.getElementById('sheets-list');
+            const downloadBtn = document.getElementById('download-btn');
+
+            const stats = [
+                { value: data.rows_processed.toLocaleString(), label: 'Rows' },
+                { value: data.categories, label: 'Categories' },
+                { value: data.sheets_created.length, label: 'Sheets' },
+                { value: data.asins_extracted, label: 'ASINs' },
+                { value: data.elapsed + 's', label: 'Time' },
+            ];
+
+            statsGrid.innerHTML = stats.map(s => `
+                <div class="stat-card">
+                    <div class="stat-value">${s.value}</div>
+                    <div class="stat-label">${s.label}</div>
+                </div>
+            `).join('');
+
+            sheetsList.innerHTML = data.sheets_created.map(s =>
+                `<span class="sheet-tag">📋 ${s}</span>`
+            ).join('');
+
+            downloadBtn.href = `/api/download/${data.download_id}`;
+
+            resultsPanel.style.display = 'block';
+            resultsPanel.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+
+        function showError(msg) {
+            errorBar.textContent = '❌ ' + msg;
+            errorBar.classList.add('visible');
+        }
+        function hideError() {
+            errorBar.classList.remove('visible');
+        }
+    </script>
+</body>
+</html>
