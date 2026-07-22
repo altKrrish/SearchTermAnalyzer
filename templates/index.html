@@ -730,13 +730,28 @@
             if (fileInput.files.length) handleFile(fileInput.files[0]);
         });
 
+        async function fetchJson(url, options) {
+            const res = await fetch(url, options);
+            const contentType = res.headers.get('content-type') || '';
+            if (contentType.includes('application/json')) {
+                const data = await res.json();
+                if (!res.ok || data.error) {
+                    throw new Error(data.error || `Server error (${res.status})`);
+                }
+                return data;
+            } else {
+                const text = await res.text();
+                const clean = text.replace(/<[^>]*>?/gm, ' ').replace(/\s+/g, ' ').strip ? text.replace(/<[^>]*>?/gm, ' ').replace(/\s+/g, ' ').trim() : text;
+                throw new Error(`Server returned unexpected response (${res.status}): ${clean.slice(0, 150)}...`);
+            }
+        }
+
         async function handleFile(file) {
             if (!file.name.endsWith('.xlsx')) {
                 showError('Only .xlsx files are supported.');
                 return;
             }
 
-            // Show loading in upload zone
             uploadZone.classList.add('has-file');
             uploadZone.innerHTML = `
                 <div class="file-info">
@@ -752,14 +767,11 @@
             formData.append('file', file);
 
             try {
-                const res = await fetch('/api/upload', { method: 'POST', body: formData });
-                const data = await res.json();
-                if (data.error) throw new Error(data.error);
+                const data = await fetchJson('/api/upload', { method: 'POST', body: formData });
 
                 state.fileId = data.file_id;
                 state.filename = data.filename;
 
-                // Update upload zone
                 uploadZone.innerHTML = `
                     <div class="file-info">
                         <div class="file-icon">✅</div>
@@ -771,18 +783,15 @@
                     </div>
                 `;
 
-                // Populate sheet dropdown
                 sheetSelect.innerHTML = data.sheets.map(s =>
                     `<option value="${s}">${s}</option>`
                 ).join('');
 
-                // Auto-select preferred sheet
                 const preferred = ['Exact_Matches_Sorted', 'P1_Exact_Candidates', 'Sheet1'];
                 for (const p of preferred) {
                     if (data.sheets.includes(p)) { sheetSelect.value = p; break; }
                 }
 
-                // Enable config
                 configCard.classList.remove('disabled');
                 sheetSelect.disabled = false;
                 document.getElementById('step1-num').classList.add('done');
@@ -826,21 +835,17 @@
             if (!state.fileId || !sheet) return;
 
             try {
-                const res = await fetch('/api/columns', {
+                const data = await fetchJson('/api/columns', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ file_id: state.fileId, sheet })
                 });
-                const data = await res.json();
-                if (data.error) throw new Error(data.error);
 
-                // Populate keyword column
                 keywordCol.innerHTML = data.columns.map(c =>
                     `<option value="${c}" ${c === data.keyword_default ? 'selected' : ''}>${c}</option>`
                 ).join('');
                 keywordCol.disabled = false;
 
-                // Populate portfolio column
                 portfolioCol.innerHTML = `<option value="(None)">None</option>` +
                     data.columns.map(c =>
                         `<option value="${c}" ${c === data.portfolio_default ? 'selected' : ''}>${c}</option>`
@@ -870,7 +875,7 @@
             hideError();
 
             try {
-                const res = await fetch('/api/process', {
+                const data = await fetchJson('/api/process', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -882,10 +887,6 @@
                         extract_asins: extractAsins,
                     })
                 });
-                const data = await res.json();
-                if (data.error) throw new Error(data.error);
-
-                // Show results
                 showResults(data);
                 document.getElementById('step3-num').classList.add('done');
                 document.getElementById('step3-num').textContent = '✓';

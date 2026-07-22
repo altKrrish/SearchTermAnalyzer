@@ -19,6 +19,29 @@ app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50 MB max upload
 UPLOAD_DIR = os.path.join(tempfile.gettempdir(), "sta_uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
+
+# ---------------------------------------------------------------------------
+# Global Exception Handlers (Always return JSON, never HTML errors)
+# ---------------------------------------------------------------------------
+@app.errorhandler(Exception)
+def handle_exception(e):
+    import traceback
+    return jsonify({
+        "error": f"Server Error: {str(e)}",
+        "trace": traceback.format_exc()
+    }), 500
+
+
+@app.errorhandler(404)
+def handle_404(e):
+    return jsonify({"error": "Requested API endpoint not found (404)."}), 404
+
+
+@app.errorhandler(500)
+def handle_500(e):
+    return jsonify({"error": "Internal Server Error (500)."}), 500
+
+
 # ---------------------------------------------------------------------------
 # Classification rules  (order matters – first match wins)
 # ---------------------------------------------------------------------------
@@ -73,8 +96,23 @@ ASIN_REGEX = re.compile(r'\bB0[A-Z0-9]{8}\b', re.IGNORECASE)
 # ---------------------------------------------------------------------------
 # Core logic functions
 # ---------------------------------------------------------------------------
+def parse_numeric(val):
+    """Safely parse numbers, currency strings ($1,234.50), or percentages into float."""
+    if val is None:
+        return 0.0
+    if isinstance(val, (int, float)):
+        return float(val)
+    s = str(val).replace("$", "").replace(",", "").replace("%", "").strip()
+    try:
+        return float(s)
+    except (ValueError, TypeError):
+        return 0.0
+
+
 def extract_color(search_term):
-    st_lower = search_term.lower()
+    if not search_term:
+        return None
+    st_lower = str(search_term).lower()
     for color in COLORS:
         if re.search(r'\b' + re.escape(color) + r'\b', st_lower):
             return color.title()
@@ -84,7 +122,7 @@ def extract_color(search_term):
 def classify_search_term(broad_category, search_term):
     if not search_term:
         return "Uncategorized"
-    st_lower = search_term.lower().strip()
+    st_lower = str(search_term).lower().strip()
     for subcat, cat_match, patterns in CLASSIFICATION_RULES:
         if cat_match and cat_match != broad_category:
             continue
@@ -101,6 +139,7 @@ def extract_asins_from_text(text):
 
 
 def detect_header_row(ws):
+    """Scan first 15 rows and pick the row with the most non-empty columns."""
     best_row_idx = 1
     best_row_data = []
     max_cols = 0
@@ -147,6 +186,16 @@ def auto_pick_portfolio_col(headers):
         if "portfolio" in h.lower():
             return h
     return "(None)"
+
+
+def find_sales_column_index(headers):
+    """Smart auto-detection for Sales column index."""
+    for idx, h in enumerate(headers):
+        h_lower = str(h).lower()
+        if any(hint in h_lower for hint in ["sales ($)", "total_sales", "total sales", "sales", "revenue"]):
+            return idx
+    # Fallback to column index 3 if available
+    return 3 if len(headers) > 3 else 0
 
 
 # ---------------------------------------------------------------------------
@@ -307,10 +356,8 @@ def build_best_worst(groups, sales_idx, mode):
         if mode == "ASIN":
             asin_best = {}
             for asin, vals in items:
-                try:
-                    sales = float(vals[sales_idx]) if len(vals) > sales_idx and vals[sales_idx] else 0
-                except (ValueError, TypeError):
-                    sales = 0
+                raw_val = vals[sales_idx] if len(vals) > sales_idx else None
+                sales = parse_numeric(raw_val)
                 if asin not in asin_best or sales > asin_best[asin][0]:
                     asin_best[asin] = (sales, vals)
             sorted_rows = sorted(asin_best.values(), key=lambda x: x[0], reverse=True)
@@ -319,10 +366,8 @@ def build_best_worst(groups, sales_idx, mode):
             total = len(asin_best)
         else:
             def get_sales(item):
-                try:
-                    return float(item[1][sales_idx]) if len(item[1]) > sales_idx and item[1][sales_idx] else 0
-                except (ValueError, TypeError):
-                    return 0
+                raw_val = item[1][sales_idx] if len(item[1]) > sales_idx else None
+                return parse_numeric(raw_val)
             sorted_items = sorted(items, key=get_sales, reverse=True)
             top = [x[1] for x in sorted_items[:10]]
             bottom = [x[1] for x in sorted_items[-10:]] if len(sorted_items) > 10 else [x[1] for x in sorted_items]
@@ -367,7 +412,7 @@ def upload_file():
 
 @app.route("/api/columns", methods=["POST"])
 def get_columns():
-    data = request.json
+    data = request.json or {}
     file_id = data.get("file_id")
     sheet_name = data.get("sheet")
     if not file_id or not sheet_name:
@@ -397,7 +442,7 @@ def get_columns():
 
 @app.route("/api/process", methods=["POST"])
 def process():
-    data = request.json
+    data = request.json or {}
     file_id = data.get("file_id")
     sheet_name = data.get("sheet")
     keyword_col = data.get("keyword_col")
@@ -421,7 +466,7 @@ def process():
         try:
             keyword_col_idx = headers.index(keyword_col)
         except ValueError:
-            return jsonify({"error": f"Column '{keyword_col}' not found."}), 400
+            return jsonify({"error": f"Column '{keyword_col}' not found in sheet headers."}), 400
 
         portfolio_idx = None
         if portfolio_col and portfolio_col != "(None)":
@@ -469,14 +514,8 @@ def process():
                 final_subcat += f" - {color}"
             classified.append((final_subcat, search_term, vals))
 
-        # Sales column
-        try:
-            sales_idx = headers.index("Sales ($)")
-        except ValueError:
-            try:
-                sales_idx = headers.index("Total_Sales")
-            except ValueError:
-                sales_idx = 3
+        # Sales column index detection
+        sales_idx = find_sales_column_index(headers)
 
         sheets_written = []
         categories_found = set()
@@ -542,7 +581,7 @@ def process():
 def download(download_id):
     out_path = os.path.join(UPLOAD_DIR, f"{download_id}_output.xlsx")
     if not os.path.exists(out_path):
-        return jsonify({"error": "File not found"}), 404
+        return jsonify({"error": "Download link expired or file not found."}), 404
     return send_file(out_path, as_attachment=True,
                      download_name="SearchTerm_Analysis_Report.xlsx",
                      mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
