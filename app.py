@@ -104,7 +104,7 @@ def detect_header_row(ws):
     best_row_idx = 1
     best_row_data = []
     max_cols = 0
-    max_c = min(ws.max_column or 1, 100)
+    max_c = max(ws.max_column or 100, 100)
     for i, row in enumerate(ws.iter_rows(min_row=1, max_row=15, max_col=max_c, values_only=True), 1):
         raw = list(row)
         while raw and (raw[-1] is None or str(raw[-1]).strip() == ""):
@@ -430,7 +430,7 @@ def process():
             except ValueError:
                 pass
 
-        max_c = min(ws.max_column or 1, 100)
+        max_c = max(ws.max_column or 100, 100)
         data_rows = []
         for row_idx, row_vals in enumerate(
             ws.iter_rows(min_row=header_row_idx + 1, max_col=max_c, values_only=True),
