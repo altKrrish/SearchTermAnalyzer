@@ -140,7 +140,11 @@ def detect_header_row(ws):
     best_row_data = []
     max_cols = 0
     max_c = max(ws.max_column or 100, 100)
-    for i, row in enumerate(ws.iter_rows(min_row=1, max_row=15, max_col=max_c, values_only=True), 1):
+    
+    # Read into a list first because read_only mode does not support multiple iterations
+    first_rows = list(ws.iter_rows(min_row=1, max_row=15, max_col=max_c, values_only=True))
+    
+    for i, row in enumerate(first_rows, 1):
         raw = list(row)
         while raw and (raw[-1] is None or str(raw[-1]).strip() == ""):
             raw.pop()
@@ -149,8 +153,9 @@ def detect_header_row(ws):
             max_cols = col_count
             best_row_idx = i
             best_row_data = raw
+            
     if max_cols == 0:
-        for i, row in enumerate(ws.iter_rows(min_row=1, max_row=15, max_col=max_c, values_only=True), 1):
+        for i, row in enumerate(first_rows, 1):
             raw = list(row)
             while raw and (raw[-1] is None or str(raw[-1]).strip() == ""):
                 raw.pop()
@@ -159,6 +164,7 @@ def detect_header_row(ws):
                 max_cols = col_count
                 best_row_idx = i
                 best_row_data = raw
+                
     return best_row_idx, best_row_data
 
 
@@ -468,6 +474,11 @@ def process():
             header_row_idx, raw_headers = detect_header_row(ws)
             headers = build_headers_list(raw_headers)
             num_cols = len(headers)
+            
+            # Reopen the workbook to reset the read_only iterator before the second pass
+            wb_in.close()
+            wb_in = openpyxl.load_workbook(tmp_path, read_only=True, data_only=True)
+            ws = wb_in[sheet_name]
 
             try:
                 keyword_col_idx = headers.index(keyword_col)
