@@ -134,34 +134,6 @@ def extract_asins_from_text(text):
     return [m.upper() for m in ASIN_REGEX.findall(str(text))]
 
 
-def detect_header_row(ws):
-    best_row_idx = 1
-    best_row_data = []
-    max_cols = 0
-    max_c = max(ws.max_column or 1, 100)
-    for i, row in enumerate(ws.iter_rows(min_row=1, max_row=15, max_col=max_c, values_only=True), 1):
-        raw = list(row)
-        while raw and (raw[-1] is None or str(raw[-1]).strip() == ""):
-            raw.pop()
-        col_count = sum(1 for v in raw if v is not None and str(v).strip() != "")
-        if col_count > max_cols and col_count >= 2:
-            max_cols = col_count
-            best_row_idx = i
-            best_row_data = raw
-
-    if max_cols == 0:
-        for i, row in enumerate(ws.iter_rows(min_row=1, max_row=15, max_col=max_c, values_only=True), 1):
-            raw = list(row)
-            while raw and (raw[-1] is None or str(raw[-1]).strip() == ""):
-                raw.pop()
-            col_count = sum(1 for v in raw if v is not None and str(v).strip() != "")
-            if col_count > max_cols:
-                max_cols = col_count
-                best_row_idx = i
-                best_row_data = raw
-    return best_row_idx, best_row_data
-
-
 def build_headers_list(raw_headers):
     headers = []
     for idx, h in enumerate(raw_headers, 1):
@@ -398,13 +370,32 @@ def inspect_file():
             tmp_path = tmp.name
 
         try:
-            wb = openpyxl.load_workbook(tmp_path, read_only=True)
+            wb = openpyxl.load_workbook(tmp_path, read_only=True, data_only=True)
             sheets = wb.sheetnames
             sheet_columns = {}
 
             for sheet in sheets:
                 ws = wb[sheet]
-                header_row_idx, raw_headers = detect_header_row(ws)
+                valid_rows = []
+                for row in ws.iter_rows(values_only=True):
+                    if not any(cell is not None and str(cell).strip() != "" for cell in row):
+                        continue
+                    valid_rows.append(list(row))
+                    if len(valid_rows) >= 15:
+                        break
+                
+                header_row_idx = 1
+                max_cols = 0
+                raw_headers = []
+                for i, row in enumerate(valid_rows, 1):
+                    while row and (row[-1] is None or str(row[-1]).strip() == ""):
+                        row.pop()
+                    col_count = sum(1 for v in row if v is not None and str(v).strip() != "")
+                    if col_count > max_cols:
+                        max_cols = col_count
+                        header_row_idx = i
+                        raw_headers = row
+                        
                 headers = build_headers_list(raw_headers)
                 sheet_columns[sheet] = {
                     "columns": headers,
@@ -459,12 +450,31 @@ def process():
             tmp_path = tmp.name
 
         try:
-            wb_in = openpyxl.load_workbook(tmp_path, data_only=True)
+            wb_in = openpyxl.load_workbook(tmp_path, read_only=True, data_only=True)
             if sheet_name not in wb_in.sheetnames:
                 return jsonify({"error": f"Sheet '{sheet_name}' not found in workbook."}), 400
 
             ws = wb_in[sheet_name]
-            header_row_idx, raw_headers = detect_header_row(ws)
+            
+            valid_rows = []
+            for row in ws.iter_rows(values_only=True):
+                if not any(cell is not None and str(cell).strip() != "" for cell in row):
+                    continue
+                valid_rows.append(list(row))
+            wb_in.close()
+
+            header_row_idx = 0
+            max_cols = 0
+            raw_headers = []
+            for i, row in enumerate(valid_rows[:15]):
+                while row and (row[-1] is None or str(row[-1]).strip() == ""):
+                    row.pop()
+                col_count = sum(1 for v in row if v is not None and str(v).strip() != "")
+                if col_count > max_cols:
+                    max_cols = col_count
+                    header_row_idx = i
+                    raw_headers = row
+
             headers = build_headers_list(raw_headers)
             num_cols = len(headers)
 
@@ -481,19 +491,14 @@ def process():
                     pass
 
             # Read data rows
-            max_c = max(ws.max_column or 1, 100)
             data_rows = []
-            for row_idx, row_vals in enumerate(ws.iter_rows(min_row=header_row_idx + 1, max_col=max_c, values_only=True), start=header_row_idx + 1):
-                if not row_vals:
-                    continue
-                vals = list(row_vals[:num_cols])
+            for row_idx_offset, vals in enumerate(valid_rows[header_row_idx + 1:], start=header_row_idx + 2):
                 if len(vals) < num_cols:
                     vals.extend([None] * (num_cols - len(vals)))
+                
                 cell_kw = vals[keyword_col_idx] if keyword_col_idx < len(vals) else None
                 if cell_kw and str(cell_kw).strip() != "" and "|" not in str(vals[0] or ""):
-                    data_rows.append((row_idx, vals))
-                    
-            wb_in.close()
+                    data_rows.append((row_idx_offset, vals))
         finally:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
