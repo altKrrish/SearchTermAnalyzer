@@ -393,22 +393,30 @@ def inspect_file():
         return jsonify({"error": "Only .xlsx files are supported"}), 400
 
     try:
-        # Load workbook in read_only mode for instant inspection
-        wb = openpyxl.load_workbook(f, read_only=True)
-        sheets = wb.sheetnames
-        sheet_columns = {}
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
+            f.save(tmp.name)
+            tmp_path = tmp.name
 
-        for sheet in sheets:
-            ws = wb[sheet]
-            header_row_idx, raw_headers = detect_header_row(ws)
-            headers = build_headers_list(raw_headers)
-            sheet_columns[sheet] = {
-                "columns": headers,
-                "header_row": header_row_idx,
-                "keyword_default": auto_pick_keyword_col(headers),
-                "portfolio_default": auto_pick_portfolio_col(headers),
-            }
-        wb.close()
+        try:
+            # Load workbook in read_only mode for instant inspection
+            wb = openpyxl.load_workbook(tmp_path, read_only=True, data_only=True)
+            sheets = wb.sheetnames
+            sheet_columns = {}
+
+            for sheet in sheets:
+                ws = wb[sheet]
+                header_row_idx, raw_headers = detect_header_row(ws)
+                headers = build_headers_list(raw_headers)
+                sheet_columns[sheet] = {
+                    "columns": headers,
+                    "header_row": header_row_idx,
+                    "keyword_default": auto_pick_keyword_col(headers),
+                    "portfolio_default": auto_pick_portfolio_col(headers),
+                }
+            wb.close()
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
 
         default_sheet = sheets[0]
         for preferred in ["Exact_Matches_Sorted", "P1_Exact_Candidates", "Sheet1"]:
@@ -447,43 +455,52 @@ def process():
 
     start_time = time.time()
     try:
-        wb = openpyxl.load_workbook(f)
-        if sheet_name not in wb.sheetnames:
-            return jsonify({"error": f"Sheet '{sheet_name}' not found in workbook."}), 400
-
-        ws = wb[sheet_name]
-        header_row_idx, raw_headers = detect_header_row(ws)
-        headers = build_headers_list(raw_headers)
-        num_cols = len(headers)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
+            f.save(tmp.name)
+            tmp_path = tmp.name
 
         try:
-            keyword_col_idx = headers.index(keyword_col)
-        except ValueError:
-            return jsonify({"error": f"Column '{keyword_col}' not found in sheet headers."}), 400
+            wb_in = openpyxl.load_workbook(tmp_path, read_only=True, data_only=True)
+            if sheet_name not in wb_in.sheetnames:
+                return jsonify({"error": f"Sheet '{sheet_name}' not found in workbook."}), 400
 
-        portfolio_idx = None
-        if portfolio_col and portfolio_col != "(None)":
+            ws = wb_in[sheet_name]
+            header_row_idx, raw_headers = detect_header_row(ws)
+            headers = build_headers_list(raw_headers)
+            num_cols = len(headers)
+
             try:
-                portfolio_idx = headers.index(portfolio_col)
+                keyword_col_idx = headers.index(keyword_col)
             except ValueError:
-                pass
+                return jsonify({"error": f"Column '{keyword_col}' not found in sheet headers."}), 400
 
-        max_c = max(ws.max_column or 100, 100)
-        data_rows = []
-        for row_idx, row_vals in enumerate(
-            ws.iter_rows(min_row=header_row_idx + 1, max_col=max_c, values_only=True),
-            start=header_row_idx + 1
-        ):
-            if not row_vals:
-                continue
-            vals = list(row_vals[:num_cols])
-            if len(vals) < num_cols:
-                vals.extend([None] * (num_cols - len(vals)))
-            
-            cell_kw = vals[keyword_col_idx] if keyword_col_idx < len(vals) else None
-            cell_first = vals[0] if len(vals) > 0 else None
-            if cell_kw and str(cell_kw).strip() != "" and "|" not in str(cell_first or ""):
-                data_rows.append((row_idx, vals))
+            portfolio_idx = None
+            if portfolio_col and portfolio_col != "(None)":
+                try:
+                    portfolio_idx = headers.index(portfolio_col)
+                except ValueError:
+                    pass
+
+            data_rows = []
+            for row_idx, row_vals in enumerate(
+                ws.iter_rows(min_row=header_row_idx + 1, max_col=num_cols, values_only=True),
+                start=header_row_idx + 1
+            ):
+                if not row_vals:
+                    continue
+                vals = list(row_vals[:num_cols])
+                if len(vals) < num_cols:
+                    vals.extend([None] * (num_cols - len(vals)))
+                
+                cell_kw = vals[keyword_col_idx] if keyword_col_idx < len(vals) else None
+                cell_first = vals[0] if len(vals) > 0 else None
+                if cell_kw and str(cell_kw).strip() != "" and "|" not in str(cell_first or ""):
+                    data_rows.append((row_idx, vals))
+                    
+            wb_in.close()
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
 
         # ASIN Extraction
         all_asins = set()
@@ -512,7 +529,30 @@ def process():
         # Sales column index detection
         sales_idx = find_sales_column_index(headers)
 
-        sheets_written = []
+        # Create output workbook
+        wb_out = openpyxl.Workbook()
+        if "Sheet" in wb_out.sheetnames:
+            del wb_out["Sheet"]
+            
+        # Recreate the original data sheet to preserve it
+        ws_orig = wb_out.create_sheet(sheet_name)
+        
+        # Write headers
+        for c_idx, h in enumerate(headers, 1):
+            cell = ws_orig.cell(row=1, column=c_idx, value=h)
+            cell.font = Font(bold=True)
+            cell.fill = PatternFill(start_color="DDDDDD", end_color="DDDDDD", fill_type="solid")
+            
+        # Write data rows
+        for r_idx, (orig_r, vals) in enumerate(data_rows, 2):
+            for c_idx, val in enumerate(vals, 1):
+                ws_orig.cell(row=r_idx, column=c_idx, value=val)
+                
+        # Optional: Auto-filter for original data sheet
+        if data_rows:
+            ws_orig.auto_filter.ref = f"A1:{openpyxl.utils.get_column_letter(num_cols)}{len(data_rows)+1}"
+
+        sheets_written = [sheet_name]
         categories_found = set()
         do_search = analysis_mode in ("Search Term", "Both")
         do_asin = analysis_mode in ("ASIN", "Both")
@@ -522,7 +562,7 @@ def process():
             for subcat, search_term, vals in classified:
                 st_groups[subcat].append((search_term, vals))
             best, worst, summary = build_best_worst(st_groups, sales_idx, "Search Term")
-            write_analysis_sheet(wb, "SearchTerm_Analysis",
+            write_analysis_sheet(wb_out, "SearchTerm_Analysis",
                 "Search Term Analysis  |  Top 10 Best & Worst per Category",
                 "2F5496", headers, "Product Subcategory", best, worst)
             sheets_written.append("SearchTerm_Analysis")
@@ -542,20 +582,20 @@ def process():
                     asin_groups[grp_key].append((asin, vals))
             cat_label = "Portfolio" if portfolio_idx is not None else "Product Subcategory"
             best, worst, summary = build_best_worst(asin_groups, sales_idx, "ASIN")
-            write_analysis_sheet(wb, "ASIN_Analysis",
+            write_analysis_sheet(wb_out, "ASIN_Analysis",
                 "ASIN Analysis  |  Top 10 Best & Worst per Category",
                 "1B5E20", headers, cat_label, best, worst)
             sheets_written.append("ASIN_Analysis")
 
         asin_count = 0
         if extract_asins_flag and asin_rows_list:
-            write_asin_sheet(wb, all_asins, asin_rows_list, portfolio_idx)
+            write_asin_sheet(wb_out, all_asins, asin_rows_list, portfolio_idx)
             sheets_written.append("Extracted_ASINs")
             asin_count = len(all_asins)
 
         out_id = str(uuid.uuid4())
         out_path = os.path.join(OUTPUT_DIR, f"{out_id}_output.xlsx")
-        wb.save(out_path)
+        wb_out.save(out_path)
         elapsed = time.time() - start_time
 
         return jsonify({
