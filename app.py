@@ -1,5 +1,6 @@
 """
-Amazon Search Term & ASIN Analyzer — Flask Web App for Render Deployment
+Amazon Search Term & ASIN Analyzer — Production Flask Web App for Render
+Stateless, Atomic File Processing & High-Performance Excel Analytics Engine
 """
 
 import os
@@ -15,15 +16,15 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 import openpyxl.utils
 
 app = Flask(__name__)
-app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50 MB max upload
+app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50 MB limit
 app.config['PROPAGATE_EXCEPTIONS'] = False
 
-UPLOAD_DIR = os.path.join(tempfile.gettempdir(), "sta_uploads")
-os.makedirs(UPLOAD_DIR, exist_ok=True)
+OUTPUT_DIR = os.path.join(tempfile.gettempdir(), "sta_outputs")
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 
 # ---------------------------------------------------------------------------
-# Global Exception Handlers (Always return JSON, never HTML)
+# Global Exception Handler (Guarantees JSON error response)
 # ---------------------------------------------------------------------------
 @app.errorhandler(Exception)
 def handle_unexpected_error(e):
@@ -92,7 +93,7 @@ ASIN_REGEX = re.compile(r'\bB0[A-Z0-9]{8}\b', re.IGNORECASE)
 # Core logic functions
 # ---------------------------------------------------------------------------
 def parse_numeric(val):
-    """Safely parse numbers, currency strings ($1,234.50), or percentages into float."""
+    """Safely parse currency strings ($1,234.50), numbers, or percentages into float."""
     if val is None:
         return 0.0
     if isinstance(val, (int, float)):
@@ -184,7 +185,6 @@ def auto_pick_portfolio_col(headers):
 
 
 def find_sales_column_index(headers):
-    """Smart auto-detection for Sales column index."""
     for idx, h in enumerate(headers):
         h_lower = str(h).lower()
         if any(hint in h_lower for hint in ["sales ($)", "total_sales", "total sales", "sales", "revenue"]):
@@ -383,77 +383,75 @@ def index():
     return render_template("index.html")
 
 
-@app.route("/api/upload", methods=["POST"])
-def upload_file():
+@app.route("/api/inspect", methods=["POST"])
+def inspect_file():
+    """Atomic endpoint: Fast read-only inspection of sheets and column headers (<200ms)."""
     if "file" not in request.files:
         return jsonify({"error": "No file uploaded"}), 400
     f = request.files["file"]
     if not f.filename.endswith(".xlsx"):
         return jsonify({"error": "Only .xlsx files are supported"}), 400
 
-    file_id = str(uuid.uuid4())
-    save_path = os.path.join(UPLOAD_DIR, f"{file_id}.xlsx")
-    f.save(save_path)
-
     try:
-        wb = openpyxl.load_workbook(save_path, read_only=True)
+        # Load workbook in read_only mode for instant inspection
+        wb = openpyxl.load_workbook(f, read_only=True)
         sheets = wb.sheetnames
+        sheet_columns = {}
+
+        for sheet in sheets:
+            ws = wb[sheet]
+            header_row_idx, raw_headers = detect_header_row(ws)
+            headers = build_headers_list(raw_headers)
+            sheet_columns[sheet] = {
+                "columns": headers,
+                "header_row": header_row_idx,
+                "keyword_default": auto_pick_keyword_col(headers),
+                "portfolio_default": auto_pick_portfolio_col(headers),
+            }
         wb.close()
-    except Exception as e:
-        return jsonify({"error": f"Cannot read Excel file: {e}"}), 400
 
-    return jsonify({"file_id": file_id, "sheets": sheets, "filename": f.filename})
+        default_sheet = sheets[0]
+        for preferred in ["Exact_Matches_Sorted", "P1_Exact_Candidates", "Sheet1"]:
+            if preferred in sheets:
+                default_sheet = preferred
+                break
 
-
-@app.route("/api/columns", methods=["POST"])
-def get_columns():
-    data = request.json or {}
-    file_id = data.get("file_id")
-    sheet_name = data.get("sheet")
-    if not file_id or not sheet_name:
-        return jsonify({"error": "Missing file_id or sheet"}), 400
-
-    file_path = os.path.join(UPLOAD_DIR, f"{file_id}.xlsx")
-    if not os.path.exists(file_path):
-        return jsonify({"error": "File session expired or not found. Please re-upload your Excel file."}), 404
-
-    try:
-        wb = openpyxl.load_workbook(file_path, read_only=True)
-        ws = wb[sheet_name]
-        header_row_idx, raw_headers = detect_header_row(ws)
-        wb.close()
-        headers = build_headers_list(raw_headers)
-        keyword_default = auto_pick_keyword_col(headers)
-        portfolio_default = auto_pick_portfolio_col(headers)
         return jsonify({
-            "columns": headers,
-            "header_row": header_row_idx,
-            "keyword_default": keyword_default,
-            "portfolio_default": portfolio_default,
+            "success": True,
+            "filename": f.filename,
+            "sheets": sheets,
+            "default_sheet": default_sheet,
+            "sheet_columns": sheet_columns
         })
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        import traceback
+        return jsonify({"error": f"Cannot read Excel file: {str(e)}", "trace": traceback.format_exc()}), 400
 
 
 @app.route("/api/process", methods=["POST"])
 def process():
-    data = request.json or {}
-    file_id = data.get("file_id")
-    sheet_name = data.get("sheet")
-    keyword_col = data.get("keyword_col")
-    portfolio_col = data.get("portfolio_col")
-    analysis_mode = data.get("analysis_mode", "Search Term")
-    extract_asins_flag = data.get("extract_asins", True)
+    """Atomic endpoint: Processes uploaded file and options in a single HTTP POST request."""
+    if "file" not in request.files:
+        return jsonify({"error": "No file uploaded in request."}), 400
+    f = request.files["file"]
+    sheet_name = request.form.get("sheet")
+    keyword_col = request.form.get("keyword_col")
+    portfolio_col = request.form.get("portfolio_col")
+    analysis_mode = request.form.get("analysis_mode", "Search Term")
+    extract_asins_flag = request.form.get("extract_asins", "true").lower() in ("true", "1", "yes")
 
-    file_path = os.path.join(UPLOAD_DIR, f"{file_id}.xlsx")
-    if not os.path.exists(file_path):
-        return jsonify({"error": "File session expired or not found. Please re-upload your Excel file."}), 404
+    if not sheet_name:
+        return jsonify({"error": "Please select a target sheet."}), 400
+    if not keyword_col:
+        return jsonify({"error": "Please select a Keyword column."}), 400
 
     start_time = time.time()
     try:
-        wb = openpyxl.load_workbook(file_path)
-        ws = wb[sheet_name]
+        wb = openpyxl.load_workbook(f)
+        if sheet_name not in wb.sheetnames:
+            return jsonify({"error": f"Sheet '{sheet_name}' not found in workbook."}), 400
 
+        ws = wb[sheet_name]
         header_row_idx, raw_headers = detect_header_row(ws)
         headers = build_headers_list(raw_headers)
         num_cols = len(headers)
@@ -556,7 +554,7 @@ def process():
             asin_count = len(all_asins)
 
         out_id = str(uuid.uuid4())
-        out_path = os.path.join(UPLOAD_DIR, f"{out_id}_output.xlsx")
+        out_path = os.path.join(OUTPUT_DIR, f"{out_id}_output.xlsx")
         wb.save(out_path)
         elapsed = time.time() - start_time
 
@@ -576,9 +574,9 @@ def process():
 
 @app.route("/api/download/<download_id>")
 def download(download_id):
-    out_path = os.path.join(UPLOAD_DIR, f"{out_id}_output.xlsx")
+    out_path = os.path.join(OUTPUT_DIR, f"{download_id}_output.xlsx")
     if not os.path.exists(out_path):
-        return jsonify({"error": "Download link expired or file not found."}), 404
+        return jsonify({"error": "Download file expired or not found."}), 404
     return send_file(out_path, as_attachment=True,
                      download_name="SearchTerm_Analysis_Report.xlsx",
                      mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
