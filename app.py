@@ -16,30 +16,25 @@ import openpyxl.utils
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50 MB max upload
+app.config['PROPAGATE_EXCEPTIONS'] = False
+
 UPLOAD_DIR = os.path.join(tempfile.gettempdir(), "sta_uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 
 # ---------------------------------------------------------------------------
-# Global Exception Handlers (Always return JSON, never HTML errors)
+# Global Exception Handlers (Always return JSON, never HTML)
 # ---------------------------------------------------------------------------
 @app.errorhandler(Exception)
-def handle_exception(e):
+def handle_unexpected_error(e):
     import traceback
+    code = 500
+    if hasattr(e, 'code') and isinstance(e.code, int):
+        code = e.code
     return jsonify({
-        "error": f"Server Error: {str(e)}",
+        "error": str(e),
         "trace": traceback.format_exc()
-    }), 500
-
-
-@app.errorhandler(404)
-def handle_404(e):
-    return jsonify({"error": "Requested API endpoint not found (404)."}), 404
-
-
-@app.errorhandler(500)
-def handle_500(e):
-    return jsonify({"error": "Internal Server Error (500)."}), 500
+    }), code
 
 
 # ---------------------------------------------------------------------------
@@ -194,7 +189,6 @@ def find_sales_column_index(headers):
         h_lower = str(h).lower()
         if any(hint in h_lower for hint in ["sales ($)", "total_sales", "total sales", "sales", "revenue"]):
             return idx
-    # Fallback to column index 3 if available
     return 3 if len(headers) > 3 else 0
 
 
@@ -356,7 +350,7 @@ def build_best_worst(groups, sales_idx, mode):
         if mode == "ASIN":
             asin_best = {}
             for asin, vals in items:
-                raw_val = vals[sales_idx] if len(vals) > sales_idx else None
+                raw_val = vals[sales_idx] if (sales_idx < len(vals)) else None
                 sales = parse_numeric(raw_val)
                 if asin not in asin_best or sales > asin_best[asin][0]:
                     asin_best[asin] = (sales, vals)
@@ -366,7 +360,8 @@ def build_best_worst(groups, sales_idx, mode):
             total = len(asin_best)
         else:
             def get_sales(item):
-                raw_val = item[1][sales_idx] if len(item[1]) > sales_idx else None
+                vals = item[1]
+                raw_val = vals[sales_idx] if (sales_idx < len(vals)) else None
                 return parse_numeric(raw_val)
             sorted_items = sorted(items, key=get_sales, reverse=True)
             top = [x[1] for x in sorted_items[:10]]
@@ -420,7 +415,7 @@ def get_columns():
 
     file_path = os.path.join(UPLOAD_DIR, f"{file_id}.xlsx")
     if not os.path.exists(file_path):
-        return jsonify({"error": "File not found. Please re-upload."}), 404
+        return jsonify({"error": "File session expired or not found. Please re-upload your Excel file."}), 404
 
     try:
         wb = openpyxl.load_workbook(file_path, read_only=True)
@@ -452,7 +447,7 @@ def process():
 
     file_path = os.path.join(UPLOAD_DIR, f"{file_id}.xlsx")
     if not os.path.exists(file_path):
-        return jsonify({"error": "File not found. Please re-upload."}), 404
+        return jsonify({"error": "File session expired or not found. Please re-upload your Excel file."}), 404
 
     start_time = time.time()
     try:
@@ -486,8 +481,10 @@ def process():
             vals = list(row_vals[:num_cols])
             if len(vals) < num_cols:
                 vals.extend([None] * (num_cols - len(vals)))
+            
             cell_kw = vals[keyword_col_idx] if keyword_col_idx < len(vals) else None
-            if cell_kw and str(cell_kw).strip() != "" and "|" not in str(vals[0] or ""):
+            cell_first = vals[0] if len(vals) > 0 else None
+            if cell_kw and str(cell_kw).strip() != "" and "|" not in str(cell_first or ""):
                 data_rows.append((row_idx, vals))
 
         # ASIN Extraction
@@ -495,8 +492,8 @@ def process():
         asin_rows_list = []
         if extract_asins_flag:
             for _, vals in data_rows:
-                st = str(vals[keyword_col_idx]).strip() if vals[keyword_col_idx] else ""
-                port = str(vals[portfolio_idx]).strip() if portfolio_idx is not None and vals[portfolio_idx] else ""
+                st = str(vals[keyword_col_idx]).strip() if (keyword_col_idx < len(vals) and vals[keyword_col_idx] is not None) else ""
+                port = str(vals[portfolio_idx]).strip() if (portfolio_idx is not None and portfolio_idx < len(vals) and vals[portfolio_idx] is not None) else ""
                 for asin in extract_asins_from_text(st):
                     if asin not in all_asins:
                         all_asins.add(asin)
@@ -505,8 +502,8 @@ def process():
         # Classify
         classified = []
         for _, vals in data_rows:
-            broad_cat = str(vals[0]).strip() if vals[0] else ""
-            search_term = str(vals[keyword_col_idx]).strip() if vals[keyword_col_idx] else ""
+            broad_cat = str(vals[0]).strip() if (len(vals) > 0 and vals[0] is not None) else ""
+            search_term = str(vals[keyword_col_idx]).strip() if (keyword_col_idx < len(vals) and vals[keyword_col_idx] is not None) else ""
             base_subcat = classify_search_term(broad_cat, search_term)
             color = extract_color(search_term)
             final_subcat = base_subcat
@@ -539,7 +536,7 @@ def process():
                 asins = extract_asins_from_text(search_term)
                 if not asins:
                     continue
-                if portfolio_idx is not None and vals[portfolio_idx]:
+                if portfolio_idx is not None and portfolio_idx < len(vals) and vals[portfolio_idx] is not None and str(vals[portfolio_idx]).strip():
                     grp_key = str(vals[portfolio_idx]).strip()
                 else:
                     grp_key = subcat
@@ -579,7 +576,7 @@ def process():
 
 @app.route("/api/download/<download_id>")
 def download(download_id):
-    out_path = os.path.join(UPLOAD_DIR, f"{download_id}_output.xlsx")
+    out_path = os.path.join(UPLOAD_DIR, f"{out_id}_output.xlsx")
     if not os.path.exists(out_path):
         return jsonify({"error": "Download link expired or file not found."}), 404
     return send_file(out_path, as_attachment=True,
