@@ -142,7 +142,12 @@ def detect_header_row(ws):
     max_c = max(ws.max_column or 100, 100)
     
     # Read into a list first because read_only mode does not support multiple iterations
-    first_rows = list(ws.iter_rows(min_row=1, max_row=15, max_col=max_c, values_only=True))
+    # We do NOT use min_row or max_row because openpyxl's read_only row-seeking can fail on certain XML structures
+    first_rows = []
+    for idx, row in enumerate(ws.iter_rows(max_col=max_c, values_only=True), 1):
+        first_rows.append(row)
+        if idx >= 15:
+            break
     
     for i, row in enumerate(first_rows, 1):
         raw = list(row)
@@ -493,10 +498,9 @@ def process():
                     pass
 
             data_rows = []
-            for row_idx, row_vals in enumerate(
-                ws.iter_rows(min_row=header_row_idx + 1, max_col=num_cols, values_only=True),
-                start=header_row_idx + 1
-            ):
+            for row_idx, row_vals in enumerate(ws.iter_rows(max_col=num_cols, values_only=True), start=1):
+                if row_idx <= header_row_idx:
+                    continue
                 if not row_vals:
                     continue
                 vals = list(row_vals[:num_cols])
